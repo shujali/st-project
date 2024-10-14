@@ -1,0 +1,43 @@
+---
+- name: Install Argo CD on Kubernetes
+  hosts: k8s_master  # Target the master node; you can change this to any node if needed
+  tasks:
+    - name: Create Argo CD namespace
+      community.kubernetes.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: argocd
+
+    - name: Install Argo CD using kubectl apply
+      community.kubernetes.k8s:
+        state: present
+        src: https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+        namespace: argocd
+
+    - name: Wait for Argo CD server to be ready
+      community.kubernetes.k8s_info:
+        kind: Deployment
+        namespace: argocd
+        name: argocd-server
+      register: argocd_server
+
+    - name: Wait until Argo CD server is ready
+      wait_until:
+        condition: argocd_server.resources[0].status.availableReplicas == argocd_server.resources[0].status.replicas
+        timeout: 300
+        delay: 10
+
+    - name: Get Argo CD admin password
+      community.kubernetes.k8s_exec:
+        namespace: argocd
+        pod: "{{ item }}"
+        command: "argocd admin initial-password"
+      register: admin_password
+      loop: "{{ lookup('community.kubernetes.k8s', 'pods', namespace='argocd').resources | map(attribute='metadata.name') | list }}"
+
+    - name: Output Argo CD admin password
+      debug:
+        msg: "Argo CD Admin Password: {{ admin_password.results[0].stdout }}"
