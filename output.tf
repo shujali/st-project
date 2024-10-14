@@ -3,8 +3,8 @@ output "ansible_host_ips" {
   description = "Public and Private IP addresses for Ansible host"
   value = {
     "ali-ansible-host" = {
-      public_ip  = aws_instance.ali-ansible-host.public_ip
-      private_ip = aws_instance.ali-ansible-host.private_ip
+      public_ip  = aws_instance.team4-ansible-host.public_ip
+      private_ip = aws_instance.team4-ansible-host.private_ip
     }
   }
 }
@@ -13,7 +13,7 @@ output "ansible_host_ips" {
 output "k8s_instance_ips" {
   description = "Public and Private IP addresses for K8s instances"
   value = {
-    for instance in aws_instance.ali-k8s :
+    for instance in aws_instance.team4-k8s :
     instance.tags["Name"] => {
       public_ip  = instance.public_ip
       private_ip = instance.private_ip

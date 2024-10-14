@@ -1,14 +1,14 @@
 # Ansible Host Instance
-resource "aws_instance" "ali-ansible-host" {
-  ami                         = "ami-0d64bb532e0502c46"  # Replace with a valid Ubuntu AMI for your region
-  instance_type               = "t2.micro"
+resource "aws_instance" "team4-ansible-host" {
+  ami                         = "ami-0d64bb532e0502c46" # Replace with a valid Ubuntu AMI for your region
+  instance_type               = "t2.small"
   key_name                    = aws_key_pair.tfkp1.key_name
   vpc_security_group_ids      = [aws_security_group.in-out-http-ssh.id]
   subnet_id                   = aws_subnet.sn1.id
   associate_public_ip_address = true
 
   tags = {
-    Name = "ali-ansible-host"
+    Name = "team4-ansible-host"
   }
 
   # Copy the Ansible inventory file to the Ansible host
@@ -46,32 +46,34 @@ resource "aws_instance" "ali-ansible-host" {
     }
 
     inline = [
-      "sudo apt update -y",
-      "sudo apt install -y nano net-tools vim python3 python3-pip",
-      "sudo apt install ansible-core -y",
-      "sudo hostnamectl set-hostname ali-ansible-host",
-      "echo 'ali-ansible-host' | sudo tee /etc/hostname",
+      "sudo apt update -y && sudo apt upgrade -y",
+      "sudo apt install -y nano net-tools vim",
+      "sudo apt install software-properties-common -y",
+      "sudo add-apt-repository --yes --update ppa:ansible/ansible",
+      "sudo apt install ansible -y",
+      "sudo hostnamectl set-hostname team4-ansible-host",
+      "echo 'team4-ansible-host' | sudo tee /etc/hostname",
       # # Back up the existing hosts file
-      # "if [ -f /etc/ansible/hosts ]; then sudo mv /etc/ansible/hosts /etc/ansible/hosts.bak; fi",
+      "if [ -f /etc/ansible/hosts ]; then sudo mv /etc/ansible/hosts /etc/ansible/hosts.bak; fi",
 
-      # # Copy the new inventory file from the local machine to /etc/ansible/hosts
-      "sudo cp /home/ubuntu/ansible-inventory.ini /home/ubuntu/ansible-hosts",
+      #Copy the new inventory file from the local machine to /etc/ansible/hosts
+      "sudo cp /home/ubuntu/ansible-inventory.ini /etc/ansible/hosts",
     ]
   }
 }
 
 # Kubernetes Instances (1 master, 2 clients)
-resource "aws_instance" "ali-k8s" {
+resource "aws_instance" "team4-k8s" {
   count                       = 3
-  ami                         = "ami-0d64bb532e0502c46"  # Replace with a valid Ubuntu AMI
-  instance_type               = "t2.small"
+  ami                         = "ami-0d64bb532e0502c46" # Replace with a vteam4d Ubuntu AMI
+  instance_type               = "t2.medium"
   key_name                    = aws_key_pair.tfkp1.key_name
   vpc_security_group_ids      = [aws_security_group.in-out-http-ssh.id]
   subnet_id                   = aws_subnet.sn1.id
   associate_public_ip_address = true
 
   tags = {
-    Name = element(["ali-k8s-master", "ali-k8s-client1", "ali-k8s-client2"], count.index)
+    Name = element(["team4-k8s-master", "team4-k8s-client1", "team4-k8s-client2"], count.index)
   }
 
   # Update hostnames for K8s instances
@@ -84,6 +86,7 @@ resource "aws_instance" "ali-k8s" {
     }
 
     inline = [
+      "sudo apt update -y && sudo apt upgrade -y",
       "sudo hostnamectl set-hostname ${element(["k8s-master", "k8s-client1", "k8s-client2"], count.index)}",
       "echo '${element(["k8s-master", "k8s-client1", "k8s-client2"], count.index)}' | sudo tee /etc/hostname",
       "sudo apt install -y nano vim"
@@ -93,20 +96,20 @@ resource "aws_instance" "ali-k8s" {
 
 # Update /etc/hosts on Ansible host with private IPs of K8s nodes
 resource "null_resource" "update_hosts" {
-  depends_on = [aws_instance.ali-ansible-host, aws_instance.ali-k8s]
+  depends_on = [aws_instance.team4-ansible-host, aws_instance.team4-k8s]
 
   provisioner "remote-exec" {
     connection {
       type        = "ssh"
       user        = "ubuntu"
       private_key = var.id_rsa
-      host        = aws_instance.ali-ansible-host.public_ip
+      host        = aws_instance.team4-ansible-host.public_ip
     }
 
     inline = [
-      "echo '${aws_instance.ali-k8s[0].private_ip} k8s-master' | sudo tee -a /etc/hosts",
-      "echo '${aws_instance.ali-k8s[1].private_ip} k8s-client1' | sudo tee -a /etc/hosts",
-      "echo '${aws_instance.ali-k8s[2].private_ip} k8s-client2' | sudo tee -a /etc/hosts"
+      "echo '${aws_instance.team4-k8s[0].private_ip} k8s-master' | sudo tee -a /etc/hosts",
+      "echo '${aws_instance.team4-k8s[1].private_ip} k8s-client1' | sudo tee -a /etc/hosts",
+      "echo '${aws_instance.team4-k8s[2].private_ip} k8s-client2' | sudo tee -a /etc/hosts"
     ]
   }
 }
@@ -118,7 +121,7 @@ resource "null_resource" "generate_ssh_key" {
       type        = "ssh"
       user        = "ubuntu"
       private_key = var.id_rsa
-      host        = aws_instance.ali-ansible-host.public_ip
+      host        = aws_instance.team4-ansible-host.public_ip
     }
 
     inline = [
@@ -147,7 +150,7 @@ resource "null_resource" "copy_public_key" {
       type        = "ssh"
       user        = "ubuntu"
       private_key = var.id_rsa
-      host        = aws_instance.ali-ansible-host.public_ip
+      host        = aws_instance.team4-ansible-host.public_ip
     }
 
     inline = [
@@ -162,33 +165,33 @@ resource "null_resource" "copy_public_key" {
 #   depends_on = [null_resource.copy_public_key] # Ensure the public key is already copied to the user-accessible folder
 
 #   provisioner "local-exec" {
-#       command = "ssh -vvv -i /mnt/c/users/ali/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${aws_instance.ali-ansible-host.public_ip} 'cat /home/ubuntu/id_rsa.pub' > ansible_public_key.pub"
+#       command = "ssh -vvv -i /mnt/c/Users/Ali/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${aws_instance.team4-ansible-host.public_ip} 'cat /home/ubuntu/id_rsa.pub' > ansible_public_key.pub"
 #   }
 # }
 
 # AWS Infrastructure Components (VPC, IGW, Route Table, Subnets, Security Group)
-resource "aws_internet_gateway" "aligw" {
-  vpc_id = aws_vpc.alivpc.id
+resource "aws_internet_gateway" "team4gw" {
+  vpc_id = aws_vpc.team4vpc.id
   tags = {
-    "Name" = "ali-tf-igw"
+    "Name" = "team4-tf-igw"
   }
 }
 
 resource "aws_route_table" "rtb1" {
-  vpc_id = aws_vpc.alivpc.id
+  vpc_id = aws_vpc.team4vpc.id
   tags = {
-    "Name" = "ali-tf-rtb"
+    "Name" = "team4-tf-rtb"
   }
 }
 
 resource "aws_route" "igr" {
   route_table_id         = aws_route_table.rtb1.id
   destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = aws_internet_gateway.aligw.id
+  gateway_id             = aws_internet_gateway.team4gw.id
 }
 
 resource "aws_security_group" "in-out-http-ssh" {
-  vpc_id = aws_vpc.alivpc.id
+  vpc_id = aws_vpc.team4vpc.id
   name   = "in-out-http-ssh"
 
   ingress {
@@ -232,10 +235,10 @@ resource "aws_security_group" "in-out-http-ssh" {
 }
 
 resource "aws_subnet" "sn1" {
-  vpc_id     = aws_vpc.alivpc.id
+  vpc_id     = aws_vpc.team4vpc.id
   cidr_block = "10.1.1.0/25"
   tags = {
-    "Name" = "ali-tf-vpc-sn1"
+    "Name" = "team4-tf-vpc-sn1"
   }
 }
 
@@ -244,9 +247,9 @@ resource "aws_route_table_association" "associatesn1" {
   route_table_id = aws_route_table.rtb1.id
 }
 
-resource "aws_vpc" "alivpc" {
+resource "aws_vpc" "team4vpc" {
   cidr_block = "10.1.1.0/24"
   tags = {
-    "Name" = "ali-tf-vpc"
+    "Name" = "team4-tf-vpc"
   }
 }
