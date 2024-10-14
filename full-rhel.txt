@@ -1,0 +1,378 @@
+resource "aws_key_pair" "tfkp1" {
+  key_name   = "ali-tf1-key-pair-new"
+  public_key = var.id_rsa_pub
+}# Ansible Host Instance
+resource "aws_instance" "ali-ansible-host" {
+  ami                         = "ami-07d1e0a32156d0d21" # RHEL AMI
+  instance_type               = "t2.micro"
+  key_name                    = aws_key_pair.tfkp1.key_name
+  vpc_security_group_ids      = [aws_security_group.in-out-http-ssh.id]
+  subnet_id                   = aws_subnet.sn1.id
+  associate_public_ip_address = true
+
+  tags = {
+    Name = "ali-ansible-host"
+  }
+
+  # Copy the Ansible inventory file to the Ansible host
+  provisioner "file" {
+    source      = "ansible-inventory.ini"                # Local path on your machine
+    destination = "/home/ec2-user/ansible-inventory.ini" # Destination path on the Ansible host
+
+    connection {
+      type        = "ssh"
+      user        = "ec2-user" # Default RHEL user
+      private_key = var.id_rsa
+      host        = self.public_ip
+    }
+  }
+
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      user        = "ec2-user" # Default RHEL user
+      private_key = var.id_rsa
+      host        = self.public_ip
+    }
+
+    inline = [
+      "sudo dnf -y install ansible-core nano net-tools",
+      "sudo hostnamectl set-hostname ali-ansible-host",
+      "echo 'ali-ansible-host' | sudo tee /etc/hostname",
+      # Back up the existing hosts file
+      "if [ -f /etc/ansible/hosts ]; then sudo mv /etc/ansible/hosts /etc/ansible/hosts.bak; fi",
+
+      # Copy the new inventory file from the local machine to /etc/ansible/hosts
+      "sudo mv /home/ec2-user/ansible-inventory.ini /etc/ansible/hosts"
+    ]
+  }
+}
+
+# Kubernetes Instances (1 master, 2 clients)
+resource "aws_instance" "ali-k8s" {
+  count                       = 3
+  ami                         = "ami-07d1e0a32156d0d21" # RHEL AMI
+  instance_type               = "t2.small"
+  key_name                    = aws_key_pair.tfkp1.key_name
+  vpc_security_group_ids      = [aws_security_group.in-out-http-ssh.id]
+  subnet_id                   = aws_subnet.sn1.id
+  associate_public_ip_address = true
+
+  tags = {
+    Name = element(["ali-k8s-master", "ali-k8s-client1", "ali-k8s-client2"], count.index)
+  }
+
+  # Update hostnames for K8s instances
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      user        = "ec2-user" # Default RHEL user
+      private_key = var.id_rsa
+      host        = self.public_ip
+    }
+
+    inline = [
+      "sudo hostnamectl set-hostname ${element(["k8s-master", "k8s-client1", "k8s-client2"], count.index)}",
+      "echo '${element(["k8s-master", "k8s-client1", "k8s-client2"], count.index)}' | sudo tee /etc/hostname"
+    ]
+  }
+}
+
+# Update /etc/hosts on Ansible host with private IPs of K8s nodes
+resource "null_resource" "update_hosts" {
+  depends_on = [aws_instance.ali-ansible-host, aws_instance.ali-k8s]
+
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      user        = "ec2-user"
+      private_key = var.id_rsa
+      host        = aws_instance.ali-ansible-host.public_ip
+    }
+
+    inline = [
+      "echo '${aws_instance.ali-k8s[0].private_ip} k8s-master' | sudo tee -a /etc/hosts",
+      "echo '${aws_instance.ali-k8s[1].private_ip} k8s-client1' | sudo tee -a /etc/hosts",
+      "echo '${aws_instance.ali-k8s[2].private_ip} k8s-client2' | sudo tee -a /etc/hosts"
+    ]
+  }
+}
+
+# Generate SSH key on Ansible host
+resource "null_resource" "generate_ssh_key" {
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      user        = "ec2-user"
+      private_key = var.id_rsa
+      host        = aws_instance.ali-ansible-host.public_ip
+    }
+
+    inline = [
+      # Ensure the /root/.ssh directory exists
+      "sudo mkdir -p /root/.ssh",
+
+      # Set the right permissions for the .ssh directory
+      "sudo chmod 700 /root/.ssh",
+
+      # Generate SSH key for root user
+      "sudo ssh-keygen -t rsa -b 2048 -f /root/.ssh/id_rsa -q -N ''",
+
+      # Set proper permissions for the private and public key
+      "sudo chmod 600 /root/.ssh/id_rsa",
+      "sudo chmod 644 /root/.ssh/id_rsa.pub"
+    ]
+  }
+}
+
+# Copy public key to a user-accessible location
+resource "null_resource" "copy_public_key" {
+  depends_on = [null_resource.generate_ssh_key]
+
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      user        = "ec2-user"
+      private_key = var.id_rsa
+      host        = aws_instance.ali-ansible-host.public_ip
+    }
+
+    inline = [
+      "sudo cp /root/.ssh/id_rsa.pub /home/ec2-user/id_rsa.pub",
+      "sudo chown ec2-user:ec2-user /home/ec2-user/id_rsa.pub"
+    ]
+  }
+}
+
+resource "null_resource" "copy_public_key_to_local" {
+  depends_on = [null_resource.copy_public_key]
+
+  provisioner "local-exec" {
+    command = <<EOT
+      scp -v -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "/c/Users/Ali/.ssh/id_rsa" ec2-user@${aws_instance.ali-ansible-host.public_ip}:/home/ec2-user/id_rsa.pub "C:/Users/Ali/terraform/tf-build-ansible-complete/ansible_host_id_rsa.pub"
+    EOT
+  }
+}
+
+# Distribute public key to Kubernetes instances
+resource "null_resource" "distribute_public_key" {
+  depends_on = [null_resource.copy_public_key_to_local]
+
+  # Use for_each to loop through each Kubernetes instance
+  for_each = { for idx, ip in aws_instance.ali-k8s : idx => ip.public_ip }
+
+  provisioner "file" {
+    source      = "C:/Users/Ali/terraform/tf-build-ansible-complete/ansible_host_id_rsa.pub" # Local path where the key is stored
+    destination = "/home/ec2-user/id_rsa.pub"                                                # Destination path on the Kubernetes instances
+
+    connection {
+      type        = "ssh"
+      user        = "ec2-user"
+      private_key = var.id_rsa
+      host        = each.value # Use each.value to reference the current instance's public IP
+    }
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "mkdir -p ~/.ssh",
+      "cat /home/ec2-user/id_rsa.pub >> ~/.ssh/authorized_keys",
+      "chmod 600 ~/.ssh/authorized_keys"
+    ]
+
+    connection {
+      type        = "ssh"
+      user        = "ec2-user"
+      private_key = var.id_rsa
+      host        = each.value # Use each.value here too
+    }
+  }
+}
+
+# AWS Infrastructure Components (VPC, IGW, Route Table, Subnets, Security Group)
+resource "aws_internet_gateway" "aligw" {
+  vpc_id = aws_vpc.alivpc.id
+  tags = {
+    "Name" = "ali-tf-igw"
+  }
+}
+
+resource "aws_route_table" "rtb1" {
+  vpc_id = aws_vpc.alivpc.id
+  tags = {
+    "Name" = "ali-tf-rtb"
+  }
+}
+
+resource "aws_route" "igr" {
+  route_table_id         = aws_route_table.rtb1.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.aligw.id
+}
+
+resource "aws_security_group" "in-out-http-ssh" {
+  vpc_id = aws_vpc.alivpc.id
+  name   = "in-out-http-ssh"
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"] # Allow internal communication
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "in_out_http_ssh"
+  }
+}
+
+resource "aws_subnet" "sn1" {
+  vpc_id     = aws_vpc.alivpc.id
+  cidr_block = "10.1.1.0/25"
+  tags = {
+    "Name" = "ali-tf-vpc-sn1"
+  }
+}
+
+resource "aws_route_table_association" "associatesn1" {
+  subnet_id      = aws_subnet.sn1.id
+  route_table_id = aws_route_table.rtb1.id
+}
+
+resource "aws_vpc" "alivpc" {
+  cidr_block = "10.1.1.0/24"
+  tags = {
+    "Name" = "ali-tf-vpc"
+  }
+}# Output public and private IPs for Ansible host
+output "ansible_host_ips" {
+  description = "Public and Private IP addresses for Ansible host"
+  value = {
+    "ali-ansible-host" = {
+      public_ip  = aws_instance.ali-ansible-host.public_ip
+      private_ip = aws_instance.ali-ansible-host.private_ip
+    }
+  }
+}
+
+# Output public and private IPs for Kubernetes instances
+output "k8s_instance_ips" {
+  description = "Public and Private IP addresses for K8s instances"
+  value = {
+    for instance in aws_instance.ali-k8s :
+    instance.tags["Name"] => {
+      public_ip  = instance.public_ip
+      private_ip = instance.private_ip
+    }
+  }
+}
+
+
+output "key_pair_name" {
+  value = aws_key_pair.tfkp1.key_name
+}
+
+output "security_group_id" {
+  value = aws_security_group.in-out-http-ssh.id
+}
+
+output "subnet_id" {
+  value = aws_subnet.sn1.id
+}
+
+output "region" {
+  value = var.ali1_location
+}terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "5.69.0"
+    }
+  }
+}
+
+provider "aws" {
+  access_key = var.ali1_akey
+  secret_key = var.ali1_skey
+  region     = var.ali1_location
+}
+
+
+# terraform {
+#   cloud {
+
+#     organization = "ali-networks"
+
+#     workspaces {
+#       name = "dev"
+#     }
+#   }
+# }
+
+terraform {
+  cloud {
+
+    organization = "ali-networks"
+
+    workspaces {
+      name = "prod"
+    }
+  }
+}
+
+# terraform {
+#   cloud {
+#     organization = "ali-networks"
+#     hostname     = "app.terraform.io"
+#     workspaces {
+#       tags = ["tf-aws-git"]
+#     }
+#   }
+# }# Variables
+variable "ali1_akey" {
+  type = string
+}
+
+variable "ali1_skey" {
+  type = string
+}
+
+variable "ali1_location" {
+  type = string
+}
+
+variable "id_rsa_pub" {
+  type = string
+}
+
+variable "id_rsa" {
+  type = string
+}

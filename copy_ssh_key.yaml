@@ -1,0 +1,10 @@
+---
+- name: Copy SSH public key to Kubernetes instances
+  hosts: k8s_cluster  # Refers to both k8s_master and k8s_nodes
+  become: yes
+  tasks:
+    - name: Ensure SSH public key is present on the remote instances
+      authorized_key:
+        user: ec2-user   # Default user for AWS RHEL instances
+        state: present
+        key: "{{ lookup('file', '/home/ec2-user/id_rsa.pub') }}"  # Path to the public key on the Ansible host
